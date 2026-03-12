@@ -7,24 +7,23 @@ import io
 def formatear_sku(sku):
     if pd.isna(sku): return ""
     sku_str = str(sku).strip().replace('"', '').replace("'", "")
-    # Si es numérico y corto, rellenamos con ceros.
     if sku_str.isdigit() and len(sku_str) < 5:
         return sku_str.zfill(5)
     return sku_str
 
-# 2. Función de carga de archivos (Detección de separador y encoding)
-def cargar_smart(file, sep_default=';'):
+# 2. Función de carga de archivos CORREGIDA (con soporte para 'sep')
+def cargar_smart(file, sep=';'):
     if file is None: return None
     if file.name.endswith('.xlsx'):
         return pd.read_excel(file, dtype=str)
     
-    for s in [sep_default, '\t', ',']:
+    # Probamos varios separadores y encodings
+    for s in [sep, '\t', ',']:
         for enc in ['ISO-8859-1', 'utf-8', 'latin1', 'cp1252']:
             try:
                 file.seek(0)
                 df = pd.read_csv(file, sep=s, dtype=str, encoding=enc)
                 df.columns = [c.strip().lower() for c in df.columns]
-                # Validamos si hemos cargado columnas útiles
                 if len(df.columns) > 1:
                     return df
             except:
@@ -34,16 +33,16 @@ def cargar_smart(file, sep_default=';'):
 st.set_page_config(page_title="Amazon Stock Manager", layout="centered")
 st.title("📦 Actualizador de Stock Amazon")
 
-# --- PASO 1: CONFIGURACIÓN ---
-st.header("1️⃣ Configuración de Tienda y Porcentajes")
+# --- PASO 1: CONFIGURACIÓN Y PORCENTAJES ---
+st.header("1️⃣ Configuración y Porcentajes")
 col_cfg1, col_cfg2 = st.columns(2)
 with col_cfg1:
     tienda = st.selectbox("Tienda", ["Jabiru", "Turaco", "Marabu"])
     pais = st.selectbox("País de Destino", ["ES", "IT", "FR", "DE"])
     prefijo = pais if pais != "ES" else ""
 with col_cfg2:
-    p_normal = st.number_input("% Stock Estándar", value=80) / 100
-    p_rework = st.number_input("% Stock Rework (S)", value=20) / 100
+    p_normal = st.number_input("% Stock Estándar (No Rework)", value=80) / 100
+    p_rework = st.number_input("% Stock Rework (SKU empieza por S)", value=20) / 100
 
 # --- PASO 2: LÍMITES ---
 st.header("2️⃣ Configuración de Límites")
@@ -62,12 +61,12 @@ f_massalaves = st.file_uploader("🏢 2. Stock Massalaves (Central ES)", type=["
 f_pais = st.file_uploader(f"🌍 3. Stock Local {pais}", type=["csv", "xlsx"]) if pais != "ES" else None
 f_hb = st.file_uploader("🐘 4. Fichero Heavy & Bulky (HB)", type=["xlsx", "csv"])
 f_aux = st.file_uploader("🏷️ 5. Auxiliar Plytix (Familias)", type=["xlsx", "csv"])
-f_ht_file = st.file_uploader("⏱️ 6. Fichero Handling Times (Opcional)", type=["xlsx", "csv"])
+f_ht_custom = st.file_uploader(f"⏱️ 6. Fichero Handling Times {pais}", type=["xlsx", "csv"])
 f_bl_gen = st.file_uploader("🚫 7. Blacklist GLOBAL", type=["xlsx", "csv"])
 f_exc_pais = st.file_uploader(f"📍 8. Excepciones {pais}", type=["xlsx", "csv"])
 
-# Valores por defecto de HT (según tus capturas)
-mapa_ht_defecto = {
+# Valores HT por defecto (basados en tus capturas)
+mapas_defecto = {
     "ES": {"prime sfp": "0", "fbm hb": "1", "fbm no hb": "2", "sin tarifa": "10", "lanzamientos": "10", "descatalogados o bloqueados": "5"},
     "DE": {"prime sfp": "0", "fbm hb": "2", "fbm no hb": "3", "sin tarifa": "10", "lanzamientos": "10", "descatalogados o bloqueados": "5"},
     "FR": {"prime sfp": "0", "fbm hb": "1", "fbm no hb": "2", "sin tarifa": "10", "lanzamientos": "10", "descatalogados o bloqueados": "5"},
@@ -76,24 +75,23 @@ mapa_ht_defecto = {
 
 if st.button(f"🚀 GENERAR STOCK {tienda.upper()} {pais}"):
     if not (f_listing and f_massalaves and f_hb and f_aux):
-        st.error("Faltan archivos obligatorios (Listing, Massalaves, HB y Auxiliar).")
+        st.error("Faltan archivos obligatorios.")
     else:
         try:
-            # Cargar archivos
-            df_list = cargar_smart(f_listing)
+            # Cargar archivos base
+            df_list = cargar_smart(f_listing, sep='\t')
             df_mas = cargar_smart(f_massalaves, sep=';')
             df_hb_data = cargar_smart(f_hb)
             df_aux_data = cargar_smart(f_aux, sep=',')
             
-            # Cargar HT personalizado o usar defecto
-            ht_mapping = mapa_ht_defecto[pais]
-            if f_ht_file:
-                df_ht = cargar_smart(f_ht_file)
+            # Cargar HT (Custom o Defecto)
+            ht_mapping = mapas_defecto[pais]
+            if f_ht_custom:
+                df_ht = cargar_smart(f_ht_custom)
                 if df_ht is not None:
-                    # Asume Col A: Plantilla, Col B: HT
                     ht_mapping = {str(row[0]).strip().lower(): str(row[1]).strip() for row in df_ht.values}
 
-            # Identificar columnas en Listing
+            # Identificar columnas SKU y Plantilla
             col_sku_amz = next(c for c in df_list.columns if 'seller-sku' in c or 'sku' == c)
             col_msg_amz = next(c for c in df_list.columns if 'merchant-shipping-group' in c)
 
@@ -115,12 +113,9 @@ if st.button(f"🚀 GENERAR STOCK {tienda.upper()} {pais}"):
                 sku_amz = str(row[col_sku_amz]).strip()
                 sku_clean = sku_amz[len(prefijo):] if prefijo and sku_amz.startswith(prefijo) else sku_amz
                 sku_f = formatear_sku(sku_clean)
-                
                 fich = df_local if (prefijo and sku_amz.startswith(prefijo) and df_local is not None) else df_mas
                 col_ref = next(c for c in fich.columns if 'referencia' in c or 'sku' in c)
                 col_stk = 'stock disponible' if 'stock disponible' in fich.columns else 'stock operativo'
-                
-                # Búsqueda formateando ambos lados
                 match = fich[fich[col_ref].apply(formatear_sku) == sku_f]
                 stk = float(str(match[col_stk].values[0]).replace(',', '.')) if not match.empty else 0.0
                 return pd.Series([sku_f, stk, sku_f.startswith('S')])
@@ -142,7 +137,7 @@ if st.button(f"🚀 GENERAR STOCK {tienda.upper()} {pais}"):
                     return 0, "Descatalogados o bloqueados", ht_mapping.get("descatalogados o bloqueados", 5)
                 
                 lim = lim_hb if es_hb else (lim_colchones if "Descanso" in fam else (lim_jardin in fam and lim_jardin or lim_resto))
-                qty = int(np.ceil(row['stk_b'] * (p_rework if row['es_s'] else p_normal))) if row['stk_b'] >= lim else 0
+                qty = int(np.ceil(row['stk_b'] * (p_rework if row['is_s'] else p_normal))) if row['stk_b'] >= lim else 0
                 
                 if qty == 0:
                     return 0, "Descatalogados o bloqueados", ht_mapping.get("descatalogados o bloqueados", 5)
