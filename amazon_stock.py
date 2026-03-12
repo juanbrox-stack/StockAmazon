@@ -11,14 +11,14 @@ def formatear_sku(sku):
         return sku_str.zfill(5)
     return sku_str
 
-# 2. Función de carga ultra-robusta
-def cargar_smart(file, sep_pref=';'):
+# 2. Función de carga inteligente CORREGIDA (soporta 'sep' y múltiples encodings)
+def cargar_smart(file, sep=';'):
     if file is None: return None
     if file.name.endswith('.xlsx'):
         return pd.read_excel(file, dtype=str)
     
-    # Probamos combinaciones de separadores y encodings
-    for s in [sep_pref, '\t', ',', ';']:
+    # Probamos combinaciones de separadores y encodings para evitar errores de 'utf-8'
+    for s in [sep, '\t', ',', ';']:
         for enc in ['ISO-8859-1', 'utf-8', 'latin1', 'cp1252']:
             try:
                 file.seek(0)
@@ -30,7 +30,7 @@ def cargar_smart(file, sep_pref=';'):
                 continue
     return None
 
-st.set_page_config(page_title="Amazon Stock Manager", layout="centered")
+st.set_page_config(page_title="Amazon Stock Manager Pro", layout="centered")
 st.title("📦 Actualizador de Stock Amazon")
 
 # --- PASO 1: CONFIGURACIÓN Y PORCENTAJES ---
@@ -41,20 +41,20 @@ with col_cfg1:
     pais = st.selectbox("País de Destino", ["ES", "IT", "FR", "DE"])
     prefijo = pais if pais != "ES" else ""
 with col_cfg2:
-    p_normal = st.slider("% Stock Estándar", 0, 100, 80) / 100
-    p_rework = st.slider("% Stock Rework (S)", 0, 100, 20) / 100
+    p_normal = st.number_input("% Stock Estándar (No Rework)", value=80) / 100
+    p_rework = st.number_input("% Stock Rework (S)", value=20) / 100
 
 # --- PASO 2: LÍMITES ---
-st.header("2️⃣ Límites de Stock")
-c_l1, c_l2 = st.columns(2)
-with c_l1:
+st.header("2️⃣ Configuración de Límites")
+col_l1, col_l2 = st.columns(2)
+with col_l1:
     lim_hb = st.number_input("Heavy & Bulky (HB) >=", value=15)
     lim_colchones = st.number_input("Colchones/Descanso >=", value=10)
-with c_l2:
+with col_l2:
     lim_jardin = st.number_input("Jardín >=", value=10)
     lim_resto = st.number_input("Resto de catálogo >=", value=40)
 
-# --- PASO 3: CARGA SECUENCIAL ---
+# --- PASO 3: CARGA SECUENCIAL (INTERFAZ LIMPIA) ---
 st.header("3️⃣ Carga de Ficheros")
 f_listing = st.file_uploader("📄 1. Informe Listings Amazon (.txt)", type=["txt"])
 f_massalaves = st.file_uploader("🏢 2. Stock Massalaves (Central ES)", type=["csv", "xlsx"])
@@ -65,7 +65,7 @@ f_ht_custom = st.file_uploader(f"⏱️ 6. Fichero Handling Times {pais}", type=
 f_bl_gen = st.file_uploader("🚫 7. Blacklist GLOBAL", type=["xlsx", "csv"])
 f_exc_pais = st.file_uploader(f"📍 8. Excepciones {pais}", type=["xlsx", "csv"])
 
-# Valores HT por defecto (tus capturas)
+# Valores HT por defecto (basados en tus capturas de pantalla)
 mapas_defecto = {
     "ES": {"prime sfp": "0", "fbm hb": "1", "fbm no hb": "2", "sin tarifa": "10", "lanzamientos": "10", "descatalogados o bloqueados": "5"},
     "DE": {"prime sfp": "0", "fbm hb": "2", "fbm no hb": "3", "sin tarifa": "10", "lanzamientos": "10", "descatalogados o bloqueados": "5"},
@@ -78,23 +78,23 @@ if st.button(f"🚀 GENERAR STOCK {tienda.upper()} {pais}"):
         st.error("Faltan archivos obligatorios (Listing, Massalaves, HB y Auxiliar).")
     else:
         try:
-            # CARGAS CON VALIDACIÓN
+            # CARGA DE DATOS
             df_list = cargar_smart(f_listing, sep='\t')
             df_mas = cargar_smart(f_massalaves, sep=';')
             df_hb_data = cargar_smart(f_hb)
             df_aux_data = cargar_smart(f_aux, sep=',')
             
-            if df_list is None: st.error("Error al leer el Listing de Amazon."); st.stop()
-            if df_mas is None: st.error("Error al leer Stock Massalaves."); st.stop()
-            
-            # Handling Times
+            if df_list is None or df_mas is None:
+                st.error("Error crítico al leer los archivos principales. Revisa el formato."); st.stop()
+
+            # Lógica Handling Times (Fichero subido o por defecto)
             ht_mapping = mapas_defecto[pais]
             if f_ht_custom:
                 df_ht = cargar_smart(f_ht_custom)
                 if df_ht is not None:
-                    ht_mapping = {str(r[0]).strip().lower(): str(r[1]).strip() for r in df_ht.values}
+                    ht_mapping = {str(row[0]).strip().lower(): str(row[1]).strip() for row in df_ht.values}
 
-            # Identificar Columnas
+            # Identificar columnas SKU y Plantilla
             col_sku_amz = next(c for c in df_list.columns if 'sku' in c)
             col_msg_amz = next(c for c in df_list.columns if 'merchant-shipping-group' in c)
 
@@ -118,7 +118,6 @@ if st.button(f"🚀 GENERAR STOCK {tienda.upper()} {pais}"):
                 sku_f = formatear_sku(sku_clean)
                 
                 fich = df_local if (prefijo and sku_amz.startswith(prefijo) and df_local is not None) else df_mas
-                # Buscar columna de referencia
                 col_ref = next(c for c in fich.columns if 'referencia' in c or 'sku' in c)
                 col_stk = next(c for c in fich.columns if 'disponible' in c or 'operativo' in c)
                 
@@ -130,9 +129,9 @@ if st.button(f"🚀 GENERAR STOCK {tienda.upper()} {pais}"):
 
             # --- FAMILIAS ---
             df_aux_data['sku_aux'] = df_aux_data.iloc[:, 0].apply(formatear_sku)
-            col_fam = df_aux_data.columns[2]
-            df_list = df_list.merge(df_aux_data[['sku_aux', col_fam]], left_on='sku_f', right_on='sku_aux', how='left')
-            df_list['familia'] = df_list[col_fam].fillna('Resto')
+            col_fam_name = df_aux_data.columns[2]
+            df_list = df_list.merge(df_aux_data[['sku_aux', col_fam_name]], left_on='sku_f', right_on='sku_aux', how='left')
+            df_list['familia'] = df_list[col_fam_name].fillna('Resto')
 
             # --- LÓGICA FINAL ---
             def final_row(row):
@@ -154,7 +153,7 @@ if st.button(f"🚀 GENERAR STOCK {tienda.upper()} {pais}"):
             final = df_list[[col_sku_amz, 'quantity', 'msg_f', 'ht_f']]
             final.columns = ['sku', 'quantity', 'merchant-shipping-group-name', 'handling-time']
             
-            st.success("✅ ¡Procesado!")
+            st.success("✅ ¡Cálculo realizado correctamente!")
             st.dataframe(final.head(20))
             st.download_button("📥 Descargar TXT", final.to_csv(sep='\t', index=False), f"STOCK_{tienda}_{pais}.txt")
 
