@@ -5,9 +5,10 @@ import io
 from datetime import datetime
 
 # 1. Formateo de SKU estilo Excel (=TEXTO(A2;"00000"))
+# Esta función se usa para la SALIDA FINAL y para limpiar claves de cruce
 def formatear_sku_excel(val):
     if pd.isna(val) or str(val).strip() == "": return ""
-    val_str = str(val).strip().split('.')[0] # Limpiar .0 de Excel
+    val_str = str(val).strip().split('.')[0]
     if val_str.isdigit():
         return val_str.zfill(5)
     return val_str
@@ -76,10 +77,9 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
     if not (f_listing and f_massalaves and f_hb and f_aux):
         st.error("Faltan archivos obligatorios.")
     else:
-        # Carga inicial
         df_list = cargar_excel_pro(f_listing)
         
-        # Filtro FBA
+        # Filtro FBA (Omitir AMAZON_EU)
         col_ff = next((c for c in df_list.columns if 'fulfillment-channel' in c), None)
         if col_ff:
             df_list = df_list[df_list[col_ff] != "AMAZON_EU"].copy()
@@ -92,36 +92,48 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
         col_sku = next(c for c in df_list.columns if 'sku' in c)
         col_msg = next(c for c in df_list.columns if 'merchant-shipping-group' in c)
 
-        # 1. Lógica de Almacenes y SKUs
-        prefixes_local = ('FR', 'IT', 'DE')
-        df_list['use_local'] = df_list[col_sku].str.startswith(prefixes_local) & (df_local is not None)
+        # --- LÓGICA INTERNA DE CRUCE (SIN MODIFICAR EL SKU FINAL) ---
+        df_list['is_s'] = df_list[col_sku].str.startswith('S')
         
-        df_list['search_sku'] = df_list[col_sku]
-        df_list.loc[df_list['use_local'], 'search_sku'] = df_list.loc[df_list['use_local'], col_sku].str[2:]
-        df_list['sku_f'] = procesar_serie_skus(df_list['search_sku'])
+        # Identificar si debe buscar en el almacén local del país
+        def es_local(sku):
+            s = str(sku).upper()
+            return s.startswith(('FR', 'IT', 'DE')) or s.startswith(('SFR', 'SIT', 'SDE'))
+
+        df_list['use_local'] = df_list[col_sku].apply(es_local) & (df_local is not None)
         
-        # Mapas de stock robustos (Solución al error .str)
+        # Función para extraer el SKU numérico "padre" para buscar el stock físico
+        def extraer_base_busqueda(sku):
+            s = str(sku).upper()
+            if s.startswith('S'): s = s[1:] # Quitar S de Rework
+            for pref in ['FR', 'IT', 'DE']: # Quitar prefijos de país
+                if s.startswith(pref): s = s[len(pref):]
+            return s
+
+        df_list['sku_interno_busqueda'] = df_list[col_sku].apply(extraer_base_busqueda)
+        df_list['sku_f_busqueda'] = procesar_serie_skus(df_list['sku_interno_busqueda'])
+        
+        # Mapas de stock
         def get_clean_map(df):
             if df is None: return pd.Series()
             c_ref = next(c for c in df.columns if 'referencia' in c or 'sku' in c)
             c_stk = next(c for c in df.columns if 'disponible' in c or 'operativo' in c)
             df['key'] = procesar_serie_skus(df[c_ref])
-            # Aseguramos que el stock sea texto antes de limpiar comas
             df['stk_clean'] = df[c_stk].astype(str).str.replace(',', '.')
             return df.drop_duplicates('key').set_index('key')['stk_clean']
 
         stk_mas_map = get_clean_map(df_mas)
         stk_loc_map = get_clean_map(df_local)
         
+        # Asignar Stock del "Padre"
         df_list['stk_b'] = 0.0
-        # Mapeo y conversión a float blindada
-        df_list.loc[df_list['use_local'], 'stk_b'] = df_list.loc[df_list['use_local'], 'sku_f'].map(stk_loc_map).fillna("0.0").astype(float)
-        df_list.loc[~df_list['use_local'], 'stk_b'] = df_list.loc[~df_list['use_local'], 'sku_f'].map(stk_mas_map).fillna("0.0").astype(float)
+        df_list.loc[df_list['use_local'], 'stk_b'] = df_list.loc[df_list['use_local'], 'sku_f_busqueda'].map(stk_loc_map).fillna("0.0").astype(float)
+        df_list.loc[~df_list['use_local'], 'stk_b'] = df_list.loc[~df_list['use_local'], 'sku_f_busqueda'].map(stk_mas_map).fillna("0.0").astype(float)
         
-        # 2. Familias y Bloqueos
+        # Familias y Bloqueos (Usando SKU base)
         df_aux_data['key_aux'] = procesar_serie_skus(df_aux_data.iloc[:, 0])
         fam_map = df_aux_data.drop_duplicates('key_aux').set_index('key_aux').iloc[:, 1]
-        df_list['familia'] = df_list['sku_f'].map(fam_map).fillna("Resto").astype(str).str.upper()
+        df_list['familia'] = df_list['sku_f_busqueda'].map(fam_map).fillna("Resto").astype(str).str.upper()
 
         bl = set()
         if f_bl_gen: bl.update(procesar_serie_skus(cargar_excel_pro(f_bl_gen).iloc[:,0]))
@@ -129,9 +141,8 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
             skip_v = 2 if any(n in f_exc_pais.name for n in ["Espan", "Italia"]) else 0
             bl.update(procesar_serie_skus(cargar_excel_pro(f_exc_pais, skip=skip_v).iloc[:,0]))
 
-        # 3. Lógica de Cantidad
+        # Cálculo de Cantidad con el multiplicador correspondiente
         skus_hb = set(procesar_serie_skus(df_hb_data.iloc[:, 0]))
-        df_list['is_s'] = df_list['sku_f'].str.startswith('S')
         
         def get_lim(fam, sku_a, sku_f):
             if sku_a in skus_hb or sku_f in skus_hb or "HB" in fam or "GAE" in fam: return lim_hb
@@ -139,8 +150,8 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
             if "JARDÍN" in fam or "JARDIN" in fam: return lim_jardin
             return lim_resto
 
-        df_list['limite'] = [get_lim(f, a, s) for f, a, s in zip(df_list['familia'], df_list[col_sku], df_list['sku_f'])]
-        df_list['bloqueado'] = df_list[col_sku].isin(bl) | df_list['sku_f'].isin(bl)
+        df_list['limite'] = [get_lim(f, a, s) for f, a, s in zip(df_list['familia'], df_list[col_sku], df_list['sku_f_busqueda'])]
+        df_list['bloqueado'] = df_list[col_sku].isin(bl) | df_list['sku_f_busqueda'].isin(bl)
         
         df_list['quantity'] = np.where(
             (df_list['stk_b'] >= df_list['limite']) & (~df_list['bloqueado']),
@@ -148,21 +159,17 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
             0
         )
 
-        # 4. Salida Final
+        # SALIDA FINAL (Manteniendo el SKU original tal cual)
         final = pd.DataFrame()
-        final['sku'] = df_list[col_sku].apply(formatear_sku_excel)
+        # Aquí el SKU permanece IGUAL que en el listing, con su S y prefijos
+        final['sku'] = df_list[col_sku]
         final['quantity'] = df_list['quantity']
         final['merchant-shipping-group-name'] = df_list[col_msg]
         final['handling-time'] = final['merchant-shipping-group-name'].str.lower().map(ht_editables).fillna(2).astype(int)
         
-        st.success("✅ ¡Fichero generado sin errores!")
+        st.success(f"✅ ¡Hecho! Los SKUs con S (ej: {final['sku'].iloc[0] if not final.empty else 'S01951'}) mantienen su formato original.")
         st.dataframe(final.head(10))
         
         fecha = datetime.now().strftime("%Y%m%d")
         nombre_descarga = f"{fecha}_STOCK_{tienda}_{pais}.txt"
-        st.download_button(
-            label=f"📥 Descargar {nombre_descarga}",
-            data=final.to_csv(sep='\t', index=False),
-            file_name=nombre_descarga,
-            mime="text/plain"
-        )
+        st.download_button(label=f"📥 Descargar {nombre_descarga}", data=final.to_csv(sep='\t', index=False), file_name=nombre_descarga)
