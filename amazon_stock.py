@@ -4,9 +4,16 @@ import numpy as np
 import io
 from datetime import datetime
 
-# Función optimizada para formatear SKUs
-def optimizar_skus(serie):
-    return serie.fillna("").astype(str).str.strip().str.split('.').str[0].str.zfill(5).replace("00000", "")
+# Función para formatear SKU a 5 dígitos si es numérico (=TEXTO(A2;"00000"))
+def formatear_sku_excel(val):
+    val_str = str(val).strip().split('.')[0] # Quitar decimales de Excel
+    if val_str.isdigit():
+        return val_str.zfill(5)
+    return val_str
+
+# Función para procesar series completas de SKUs
+def procesar_serie_skus(serie):
+    return serie.fillna("").apply(formatear_sku_excel)
 
 def cargar_excel_pro(file, skip=0):
     if file is None: return None
@@ -18,23 +25,21 @@ def cargar_excel_pro(file, skip=0):
         st.error(f"Error al leer {file.name}: {e}")
         return None
 
-st.set_page_config(page_title="Amazon Stock & HT Manager", layout="centered")
-st.title("🚀 Amazon Stock Pro: Editor de Tiempos")
+st.set_page_config(page_title="Amazon Stock Manager Pro", layout="centered")
+st.title("📦 Actualizador de Stock: Lógica de Almacén y 00000")
 
-# --- PASO 1: CONFIGURACIÓN Y PAÍS ---
+# --- PASO 1: CONFIGURACIÓN ---
 st.header("1️⃣ Configuración y Porcentajes")
 col1, col2 = st.columns(2)
 with col1:
     tienda = st.selectbox("Tienda", ["Jabiru", "Turaco", "Marabu"])
     pais = st.selectbox("País de Destino", ["ES", "IT", "FR", "DE"])
-    prefijo = pais if pais != "ES" else ""
 with col2:
     p_normal = st.slider("% Stock Estándar", 0, 100, 80) / 100
     p_rework = st.slider("% Stock Rework (S)", 0, 100, 20) / 100
 
-# --- NUEVO: PANEL DE EDICIÓN DE HANDLING TIMES ---
-st.header("⏱️ Editar Handling Times por Plantilla")
-# Valores base de las capturas
+# --- PANEL DE EDICIÓN DE HANDLING TIMES ---
+st.header("⏱️ Panel de Handling Times")
 mapas_defecto = {
     "ES": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Envlo gratuito": 1, "Fitness": 1, "No prime": 1, "Prime Nacional": 0, "Envío estandar": 3},
     "DE": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 3, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 3, "Preventa": 5},
@@ -43,13 +48,11 @@ mapas_defecto = {
 }
 
 ht_editables = {}
-with st.expander(f"Modificar tiempos para {pais}"):
-    st.write("Cambia los valores para las plantillas detectadas en este país:")
+with st.expander(f"Editar valores de tiempo para {pais}"):
     current_map = mapas_defecto[pais]
-    cols = st.columns(3)
+    cols_ht = st.columns(3)
     for i, (msg, val) in enumerate(current_map.items()):
-        # Creamos un input por cada plantilla
-        ht_editables[msg.lower()] = cols[i % 3].number_input(msg, value=val, key=f"ht_{pais}_{msg}")
+        ht_editables[msg.lower()] = cols_ht[i % 3].number_input(msg, value=val, key=f"ht_{pais}_{msg}")
 
 # --- PASO 2: LÍMITES Y CARGA ---
 st.header("2️⃣ Límites y Ficheros")
@@ -62,56 +65,71 @@ with l2:
     lim_resto = st.number_input("Resto de catálogo >=", value=40)
 
 f_listing = st.file_uploader("📄 1. Informe Listings Amazon", type=["xlsx"])
-f_massalaves = st.file_uploader("🏢 2. Stock Massalaves (Central)", type=["xlsx"])
+f_massalaves = st.file_uploader("🏢 2. Stock Massalaves (Central ES)", type=["xlsx"])
 f_pais = st.file_uploader(f"🌍 3. Stock Local {pais}", type=["xlsx"]) if pais != "ES" else None
 f_hb = st.file_uploader("🐘 4. Fichero Heavy & Bulky (HB)", type=["xlsx"])
 f_aux = st.file_uploader("🏷️ 5. Auxiliar Plytix (Familias)", type=["xlsx"])
 f_bl_gen = st.file_uploader("🚫 6. Blacklist GLOBAL", type=["xlsx"])
 f_exc_pais = st.file_uploader("📍 7. Excepciones País", type=["xlsx"])
 
-if st.button("🚀 GENERAR FICHERO FINAL"):
+if st.button("🚀 GENERAR ACTUALIZACIÓN"):
     if not (f_listing and f_massalaves and f_hb and f_aux):
         st.error("Faltan archivos obligatorios.")
     else:
-        # Carga y Filtro FBA
+        # Carga
         df_list = cargar_excel_pro(f_listing)
+        
+        # Filtro FBA (AMAZON_EU)
         col_ff = next((c for c in df_list.columns if 'fulfillment-channel' in c), None)
         if col_ff:
             df_list = df_list[df_list[col_ff] != "AMAZON_EU"].copy()
         
         df_mas = cargar_excel_pro(f_massalaves)
+        df_local = cargar_excel_pro(f_pais)
         df_hb_data = cargar_excel_pro(f_hb)
         df_aux_data = cargar_excel_pro(f_aux)
         
         col_sku = next(c for c in df_list.columns if 'sku' in c)
         col_msg = next(c for c in df_list.columns if 'merchant-shipping-group' in c)
 
-        # 1. SKUs y Almacén
-        df_list['sku_base'] = df_list[col_sku].str.replace(prefijo, "", 1) if prefijo else df_list[col_sku]
-        df_list['sku_f'] = optimizar_skus(df_list['sku_base'])
+        # 1. LOGICA DE ALMACENES (FR, IT, DE -> Local | Resto -> Central)
+        prefixes_local = ('FR', 'IT', 'DE')
+        df_list['use_local'] = df_list[col_sku].str.startswith(prefixes_local) & (df_local is not None)
         
-        fich_stk = cargar_excel_pro(f_pais) if f_pais else df_mas
-        col_stk = next(c for c in fich_stk.columns if 'disponible' in c or 'operativo' in c)
-        col_ref = next(c for c in fich_stk.columns if 'referencia' in c or 'sku' in c)
+        # SKU formateado para búsqueda
+        df_list['search_sku'] = df_list[col_sku]
+        # Si es local, quitamos el prefijo (ej: FR) para buscar en su almacén
+        df_list.loc[df_list['use_local'], 'search_sku'] = df_list.loc[df_list['use_local'], col_sku].str[2:]
+        df_list['sku_f'] = procesar_serie_skus(df_list['search_sku'])
         
-        fich_stk['sku_stk_f'] = optimizar_skus(fich_stk[col_ref])
-        df_stk_clean = fich_stk.drop_duplicates('sku_stk_f').set_index('sku_stk_f')[col_stk]
-        df_list['stk_b'] = df_list['sku_f'].map(df_stk_clean).fillna("0").str.replace(',', '.').astype(float)
+        # Preparar mapas de stock vectorizados
+        def get_clean_map(df):
+            if df is None: return pd.Series()
+            c_ref = next(c for c in df.columns if 'referencia' in c or 'sku' in c)
+            c_stk = next(c for c in df.columns if 'disponible' in c or 'operativo' in c)
+            df['key'] = procesar_serie_skus(df[c_ref])
+            return df.drop_duplicates('key').set_index('key')[c_stk]
+
+        stk_mas_map = get_clean_map(df_mas)
+        stk_loc_map = get_clean_map(df_local)
         
-        # 2. Familias
-        df_aux_data['sku_aux_f'] = optimizar_skus(df_aux_data.iloc[:, 0])
-        fam_map = df_aux_data.drop_duplicates('sku_aux_f').set_index('sku_aux_f').iloc[:, 1]
+        df_list['stk_b'] = 0.0
+        df_list.loc[df_list['use_local'], 'stk_b'] = df_list.loc[df_list['use_local'], 'sku_f'].map(stk_loc_map).fillna("0").str.replace(',', '.').astype(float)
+        df_list.loc[~df_list['use_local'], 'stk_b'] = df_list.loc[~df_list['use_local'], 'sku_f'].map(stk_mas_map).fillna("0").str.replace(',', '.').astype(float)
+        
+        # 2. Familias y Bloqueos
+        df_aux_data['key_aux'] = procesar_serie_skus(df_aux_data.iloc[:, 0])
+        fam_map = df_aux_data.drop_duplicates('key_aux').set_index('key_aux').iloc[:, 1]
         df_list['familia'] = df_list['sku_f'].map(fam_map).fillna("Resto").astype(str).str.upper()
 
-        # 3. Bloqueos
         bl = set()
-        if f_bl_gen: bl.update(optimizar_skus(cargar_excel_pro(f_bl_gen).iloc[:,0]))
+        if f_bl_gen: bl.update(procesar_serie_skus(cargar_excel_pro(f_bl_gen).iloc[:,0]))
         if f_exc_pais:
             skip_v = 2 if any(n in f_exc_pais.name for n in ["Espan", "Italia"]) else 0
-            bl.update(optimizar_skus(cargar_excel_pro(f_exc_pais, skip=skip_v).iloc[:,0]))
+            bl.update(procesar_serie_skus(cargar_excel_pro(f_exc_pais, skip=skip_v).iloc[:,0]))
 
-        # 4. Cantidad
-        skus_hb = set(optimizar_skus(df_hb_data.iloc[:, 0]))
+        # 3. Lógica de Stock y Cantidad
+        skus_hb = set(procesar_serie_skus(df_hb_data.iloc[:, 0]))
         df_list['is_s'] = df_list['sku_f'].str.startswith('S')
         
         def get_lim(fam, sku_a, sku_f):
@@ -129,19 +147,26 @@ if st.button("🚀 GENERAR FICHERO FINAL"):
             0
         )
 
-        # 5. Plantillas y Tiempos Editados
+        # 4. Formato de Salida
+        # Mantenemos plantilla original de Amazon y asignamos HT según panel
         df_list['msg_f'] = df_list[col_msg]
-        # Usamos el mapa que has editado en el panel
         df_list['ht_f'] = df_list['msg_f'].str.lower().map(ht_editables).fillna(2).astype(int)
 
-        # Salida
-        final = df_list[[col_sku, 'quantity', 'msg_f', 'ht_f']]
-        final.columns = ['sku', 'quantity', 'merchant-shipping-group-name', 'handling-time']
+        # Generación Final: Los SKUs numéricos salen con 5 dígitos
+        final = pd.DataFrame()
+        final['sku'] = df_list[col_sku].apply(formatear_sku_excel)
+        final['quantity'] = df_list['quantity']
+        final['merchant-shipping-group-name'] = df_list['msg_f']
+        final['handling-time'] = df_list['ht_f']
         
-        st.success("✅ Proceso completado con los tiempos editados.")
+        st.success("✅ Fichero generado. Los SKUs numéricos han sido formateados a 5 dígitos.")
         st.dataframe(final.head(10))
         
         fecha = datetime.now().strftime("%Y%m%d")
-        st.download_button(f"📥 Descargar {fecha}_STOCK_{tienda}_{pais}.txt", 
-                           final.to_csv(sep='\t', index=False), 
-                           f"{fecha}_STOCK_{tienda}_{pais}.txt")
+        nombre_descarga = f"{fecha}_STOCK_{tienda}_{pais}.txt"
+        st.download_button(
+            label=f"📥 Descargar {nombre_descarga}",
+            data=final.to_csv(sep='\t', index=False),
+            file_name=nombre_descarga,
+            mime="text/plain"
+        )
