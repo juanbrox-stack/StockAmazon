@@ -2,7 +2,28 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
-from datetime import datetime
+from datetime import datetime
+
+st.subheader("Herramienta de Conversión")
+
+archivo = st.file_uploader("Sube un archivo para convertirlo a Excel", type=['csv', 'txt', 'json'])
+
+if archivo is not None:
+    # Llamamos a nuestra función
+    datos_excel = convertir_a_excel(archivo)
+    
+    if datos_excel:
+        # Creamos el nombre de salida dinámicamente
+        nombre_salida = archivo.name.rsplit('.', 1)[0] + ".xlsx"
+        
+        st.download_button(
+            label=f"💾 Descargar {nombre_salida}",
+            data=datos_excel,
+            file_name=nombre_salida,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.error("No se pudo procesar el archivo. Verifica el formato.")
 
 # 1. Formateo de SKU estilo Excel (=TEXTO(A2;"00000"))
 # Esta función se usa para la SALIDA FINAL y para limpiar claves de cruce
