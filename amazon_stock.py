@@ -4,14 +4,14 @@ import numpy as np
 import io
 from datetime import datetime
 
-# Función para formatear SKU a 5 dígitos si es numérico (=TEXTO(A2;"00000"))
+# 1. Formateo de SKU estilo Excel (=TEXTO(A2;"00000"))
 def formatear_sku_excel(val):
-    val_str = str(val).strip().split('.')[0] # Quitar decimales de Excel
+    if pd.isna(val) or str(val).strip() == "": return ""
+    val_str = str(val).strip().split('.')[0] # Limpiar .0 de Excel
     if val_str.isdigit():
         return val_str.zfill(5)
     return val_str
 
-# Función para procesar series completas de SKUs
 def procesar_serie_skus(serie):
     return serie.fillna("").apply(formatear_sku_excel)
 
@@ -26,7 +26,7 @@ def cargar_excel_pro(file, skip=0):
         return None
 
 st.set_page_config(page_title="Amazon Stock Manager Pro", layout="centered")
-st.title("📦 Actualizador de Stock: Lógica de Almacén y 00000")
+st.title("📦 Actualizador de Stock de Amazon Seller")
 
 # --- PASO 1: CONFIGURACIÓN ---
 st.header("1️⃣ Configuración y Porcentajes")
@@ -38,7 +38,7 @@ with col2:
     p_normal = st.slider("% Stock Estándar", 0, 100, 80) / 100
     p_rework = st.slider("% Stock Rework (S)", 0, 100, 20) / 100
 
-# --- PANEL DE EDICIÓN DE HANDLING TIMES ---
+# --- PANEL DE HANDLING TIMES ---
 st.header("⏱️ Panel de Handling Times")
 mapas_defecto = {
     "ES": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Envlo gratuito": 1, "Fitness": 1, "No prime": 1, "Prime Nacional": 0, "Envío estandar": 3},
@@ -48,7 +48,7 @@ mapas_defecto = {
 }
 
 ht_editables = {}
-with st.expander(f"Editar valores de tiempo para {pais}"):
+with st.expander(f"Editar tiempos para {pais}"):
     current_map = mapas_defecto[pais]
     cols_ht = st.columns(3)
     for i, (msg, val) in enumerate(current_map.items()):
@@ -76,10 +76,10 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
     if not (f_listing and f_massalaves and f_hb and f_aux):
         st.error("Faltan archivos obligatorios.")
     else:
-        # Carga
+        # Carga inicial
         df_list = cargar_excel_pro(f_listing)
         
-        # Filtro FBA (AMAZON_EU)
+        # Filtro FBA
         col_ff = next((c for c in df_list.columns if 'fulfillment-channel' in c), None)
         if col_ff:
             df_list = df_list[df_list[col_ff] != "AMAZON_EU"].copy()
@@ -92,30 +92,31 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
         col_sku = next(c for c in df_list.columns if 'sku' in c)
         col_msg = next(c for c in df_list.columns if 'merchant-shipping-group' in c)
 
-        # 1. LOGICA DE ALMACENES (FR, IT, DE -> Local | Resto -> Central)
+        # 1. Lógica de Almacenes y SKUs
         prefixes_local = ('FR', 'IT', 'DE')
         df_list['use_local'] = df_list[col_sku].str.startswith(prefixes_local) & (df_local is not None)
         
-        # SKU formateado para búsqueda
         df_list['search_sku'] = df_list[col_sku]
-        # Si es local, quitamos el prefijo (ej: FR) para buscar en su almacén
         df_list.loc[df_list['use_local'], 'search_sku'] = df_list.loc[df_list['use_local'], col_sku].str[2:]
         df_list['sku_f'] = procesar_serie_skus(df_list['search_sku'])
         
-        # Preparar mapas de stock vectorizados
+        # Mapas de stock robustos (Solución al error .str)
         def get_clean_map(df):
             if df is None: return pd.Series()
             c_ref = next(c for c in df.columns if 'referencia' in c or 'sku' in c)
             c_stk = next(c for c in df.columns if 'disponible' in c or 'operativo' in c)
             df['key'] = procesar_serie_skus(df[c_ref])
-            return df.drop_duplicates('key').set_index('key')[c_stk]
+            # Aseguramos que el stock sea texto antes de limpiar comas
+            df['stk_clean'] = df[c_stk].astype(str).str.replace(',', '.')
+            return df.drop_duplicates('key').set_index('key')['stk_clean']
 
         stk_mas_map = get_clean_map(df_mas)
         stk_loc_map = get_clean_map(df_local)
         
         df_list['stk_b'] = 0.0
-        df_list.loc[df_list['use_local'], 'stk_b'] = df_list.loc[df_list['use_local'], 'sku_f'].map(stk_loc_map).fillna("0").str.replace(',', '.').astype(float)
-        df_list.loc[~df_list['use_local'], 'stk_b'] = df_list.loc[~df_list['use_local'], 'sku_f'].map(stk_mas_map).fillna("0").str.replace(',', '.').astype(float)
+        # Mapeo y conversión a float blindada
+        df_list.loc[df_list['use_local'], 'stk_b'] = df_list.loc[df_list['use_local'], 'sku_f'].map(stk_loc_map).fillna("0.0").astype(float)
+        df_list.loc[~df_list['use_local'], 'stk_b'] = df_list.loc[~df_list['use_local'], 'sku_f'].map(stk_mas_map).fillna("0.0").astype(float)
         
         # 2. Familias y Bloqueos
         df_aux_data['key_aux'] = procesar_serie_skus(df_aux_data.iloc[:, 0])
@@ -128,7 +129,7 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
             skip_v = 2 if any(n in f_exc_pais.name for n in ["Espan", "Italia"]) else 0
             bl.update(procesar_serie_skus(cargar_excel_pro(f_exc_pais, skip=skip_v).iloc[:,0]))
 
-        # 3. Lógica de Stock y Cantidad
+        # 3. Lógica de Cantidad
         skus_hb = set(procesar_serie_skus(df_hb_data.iloc[:, 0]))
         df_list['is_s'] = df_list['sku_f'].str.startswith('S')
         
@@ -147,19 +148,14 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
             0
         )
 
-        # 4. Formato de Salida
-        # Mantenemos plantilla original de Amazon y asignamos HT según panel
-        df_list['msg_f'] = df_list[col_msg]
-        df_list['ht_f'] = df_list['msg_f'].str.lower().map(ht_editables).fillna(2).astype(int)
-
-        # Generación Final: Los SKUs numéricos salen con 5 dígitos
+        # 4. Salida Final
         final = pd.DataFrame()
         final['sku'] = df_list[col_sku].apply(formatear_sku_excel)
         final['quantity'] = df_list['quantity']
-        final['merchant-shipping-group-name'] = df_list['msg_f']
-        final['handling-time'] = df_list['ht_f']
+        final['merchant-shipping-group-name'] = df_list[col_msg]
+        final['handling-time'] = final['merchant-shipping-group-name'].str.lower().map(ht_editables).fillna(2).astype(int)
         
-        st.success("✅ Fichero generado. Los SKUs numéricos han sido formateados a 5 dígitos.")
+        st.success("✅ ¡Fichero generado sin errores!")
         st.dataframe(final.head(10))
         
         fecha = datetime.now().strftime("%Y%m%d")
