@@ -6,16 +6,14 @@ import csv
 from datetime import datetime
 from io import BytesIO
 
-# 1. CONFIGURACIÓN DE PÁGINA (DEBE SER LA PRIMERA LÍNEA)
-st.set_page_config(page_title="Amazon Stock Manager Pro", layout="wide")
+# 1. CONFIGURACIÓN (DEBE SER PRIMERO)
+st.set_page_config(page_title="Amazon Stock Manager Pro", layout="centered")
 
-# --- FUNCIONES DE UTILIDAD ---
+# --- FUNCIONES DE UTILIDAD ROBUSTAS ---
 
 def robust_read_csv(uploaded_file):
-    """Lectura todoterreno para CSV y TXT (Amazon)"""
+    """Lectura inteligente que evita errores de UTF-8 y comillas de Amazon"""
     if uploaded_file is None: return None
-    
-    # Lista de codificaciones a probar (común para errores de 'utf-8')
     encodings = ['utf-8', 'latin-1', 'cp1252']
     
     if uploaded_file.name.endswith('.json'):
@@ -24,29 +22,23 @@ def robust_read_csv(uploaded_file):
     for enc in encodings:
         try:
             uploaded_file.seek(0)
-            # engine='python' y sep=None detectan automáticamente si es coma o tabulación
             return pd.read_csv(uploaded_file, sep=None, engine='python', encoding=enc)
         except Exception:
             try:
-                # Segundo intento: Ignorando comillas (soluciona error de Amazon)
                 uploaded_file.seek(0)
-                return pd.read_csv(uploaded_file, sep=None, engine='python', 
-                                   encoding=enc, quoting=csv.QUOTE_NONE)
+                # Intento ignorando comillas (clave para listings de Amazon)
+                return pd.read_csv(uploaded_file, sep=None, engine='python', encoding=enc, quoting=csv.QUOTE_NONE)
             except Exception:
                 continue
     return None
 
 def convertir_a_excel(uploaded_file):
-    """Lógica para el botón de conversión rápida"""
     df_conv = robust_read_csv(uploaded_file)
     if df_conv is not None:
-        try:
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_conv.to_excel(writer, index=False)
-            return output.getvalue()
-        except Exception as e:
-            st.error(f"Error al generar Excel: {e}")
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_conv.to_excel(writer, index=False)
+        return output.getvalue()
     return None
 
 def formatear_sku_excel(val):
@@ -62,153 +54,167 @@ def procesar_serie_skus(serie):
 def cargar_excel_pro(file, skip=0):
     if file is None: return None
     try:
-        # Intentamos leer Excel normal
         if file.name.endswith(('.xlsx', '.xls')):
             df = pd.read_excel(file, skiprows=skip, dtype=str)
         else:
-            # Si se sube un CSV/TXT en los slots de abajo, lo procesamos robustamente
             df = robust_read_csv(file)
-        
         df.columns = [str(c).strip().lower() for c in df.columns]
         return df.fillna("")
     except Exception as e:
         st.error(f"Error al leer {file.name}: {e}")
         return None
 
-# --- INTERFAZ PRINCIPAL ---
+# --- INTERFAZ ORIGINAL RECOSTRUIDA ---
 
-st.title("📦 Amazon Stock Manager & Converter")
+# SECCIÓN NUEVA: HERRAMIENTA DE CONVERSIÓN (Insertada sin romper el flujo)
+st.subheader("Herramienta de Conversión")
+archivo_bloque = st.file_uploader("Sube archivos para convertirlos a Excel (Bloque)", 
+                                  type=['csv', 'txt', 'json'], 
+                                  accept_multiple_files=True, 
+                                  key="conv_bloque")
 
-# --- BLOQUE 1: CONVERSOR MULTI-ARCHIVO ---
-with st.expander("🛠️ CONVERSOR DE FICHEROS A EXCEL (En bloque)", expanded=False):
-    st.info("Sube aquí tus listings .txt o stocks .csv para bajarlos como .xlsx")
-    archivos_para_convertir = st.file_uploader(
-        "Arrastra tus ficheros aquí", 
-        type=['csv', 'txt', 'json'], 
-        accept_multiple_files=True,
-        key="conversor_bloque"
-    )
-    
-    if archivos_para_convertir:
-        cols = st.columns(2)
-        for i, f in enumerate(archivos_para_convertir):
-            with cols[i % 2]:
-                excel_data = convertir_a_excel(f)
-                if excel_data:
-                    nombre_out = f.name.rsplit('.', 1)[0] + ".xlsx"
-                    st.download_button(
-                        label=f"📥 Bajar {nombre_out}",
-                        data=excel_data,
-                        file_name=nombre_out,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"dl_{f.name}_{i}"
-                    )
+if archivo_bloque:
+    for f in archivo_bloque:
+        datos_excel = convertir_a_excel(f)
+        if datos_excel:
+            nombre_salida = f.name.rsplit('.', 1)[0] + ".xlsx"
+            st.download_button(label=f"💾 Descargar {nombre_salida}", 
+                               data=datos_excel, 
+                               file_name=nombre_salida, 
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key=f"btn_{f.name}")
 
 st.divider()
+st.title("📦 Actualizador de Stock de Amazon Seller")
 
-# --- BLOQUE 2: LÓGICA DE ACTUALIZACIÓN DE STOCK ---
-st.header("1️⃣ Configuración de Tienda")
-col_t1, col_t2, col_t3 = st.columns(3)
-with col_t1:
+# --- PASO 1: CONFIGURACIÓN ---
+st.header("1️⃣ Configuración y Porcentajes")
+col1, col2 = st.columns(2)
+with col1:
     tienda = st.selectbox("Tienda", ["Jabiru", "Turaco", "Marabu"])
     pais = st.selectbox("País de Destino", ["ES", "IT", "FR", "DE"])
-with col_t2:
+with col2:
     p_normal = st.slider("% Stock Estándar", 0, 100, 80) / 100
-with col_t3:
     p_rework = st.slider("% Stock Rework (S)", 0, 100, 20) / 100
 
-# Handling Times
+# --- PANEL DE HANDLING TIMES (RESTAURADO COMPLETO) ---
+st.header("⏱️ Panel de Handling Times")
 mapas_defecto = {
-    "ES": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Envío estándar": 3},
-    "DE": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 3, "Almacenpais": 3},
-    "FR": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Almacenpais": 1},
-    "IT": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 2, "Almacenpais": 1}
+    "ES": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Envlo gratuito": 1, "Fitness": 1, "No prime": 1, "Prime Nacional": 0, "Envío estandar": 3},
+    "DE": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 3, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 3, "Preventa": 5},
+    "FR": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 1, "Preventa": 5, "Envio 10 dias": 5, "Portes gratuitos": 2},
+    "IT": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 2, "Sin tarifa": 5, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 1, "Preventa": 5}
 }
 
 ht_editables = {}
-with st.expander(f"⏱️ Editar Handling Times para {pais}"):
-    current_map = mapas_defecto.get(pais, mapas_defecto["ES"])
-    cols_ht = st.columns(4)
+with st.expander(f"Editar tiempos para {pais}"):
+    current_map = mapas_defecto[pais]
+    cols_ht = st.columns(3)
     for i, (msg, val) in enumerate(current_map.items()):
-        ht_editables[msg.lower()] = cols_ht[i % 4].number_input(msg, value=val)
+        ht_editables[msg.lower()] = cols_ht[i % 3].number_input(msg, value=val, key=f"ht_{pais}_{msg}")
 
-st.header("2️⃣ Carga de Ficheros para Proceso")
-f1, f2, f3 = st.columns(3)
-with f1:
-    f_listing = st.file_uploader("📄 Informe Listings Amazon", type=["xlsx", "txt", "csv"])
-    f_massalaves = st.file_uploader("🏢 Stock Massalaves (Central)", type=["xlsx", "csv"])
-with f2:
-    f_hb = st.file_uploader("🐘 Fichero Heavy & Bulky (HB)", type=["xlsx", "csv"])
-    f_aux = st.file_uploader("🏷️ Auxiliar Familias", type=["xlsx", "csv"])
-with f3:
-    f_bl_gen = st.file_uploader("🚫 Blacklist GLOBAL", type=["xlsx", "csv"])
-    f_exc_pais = st.file_uploader("📍 Excepciones País", type=["xlsx", "csv"])
+# --- PASO 2: LÍMITES Y CARGA (RESTAURADO) ---
+st.header("2️⃣ Límites y Ficheros")
+l1, l2 = st.columns(2)
+with l1:
+    lim_hb = st.number_input("Heavy & Bulky (HB) >=", value=15)
+    lim_colchones = st.number_input("Colchones/Descanso >=", value=10)
+with l2:
+    lim_jardin = st.number_input("Jardín >=", value=10)
+    lim_resto = st.number_input("Resto de catálogo >=", value=40)
 
-if st.button("🚀 GENERAR FICHERO DE CARGA AMAZON"):
+f_listing = st.file_uploader("📄 1. Informe Listings Amazon", type=["xlsx", "txt", "csv"])
+f_massalaves = st.file_uploader("🏢 2. Stock Massalaves (Central ES)", type=["xlsx", "csv"])
+# Restaurado: Opción de stock del país
+f_pais = st.file_uploader(f"🌍 3. Stock Local {pais}", type=["xlsx", "csv"]) if pais != "ES" else None
+f_hb = st.file_uploader("🐘 4. Fichero Heavy & Bulky (HB)", type=["xlsx", "csv"])
+f_aux = st.file_uploader("🏷️ 5. Auxiliar Plytix (Familias)", type=["xlsx", "csv"])
+f_bl_gen = st.file_uploader("🚫 6. Blacklist GLOBAL", type=["xlsx", "csv"])
+f_exc_pais = st.file_uploader("📍 7. Excepciones País", type=["xlsx", "csv"])
+
+# --- LÓGICA DE PROCESAMIENTO ---
+if st.button("🚀 GENERAR ACTUALIZACIÓN"):
     if not (f_listing and f_massalaves and f_hb and f_aux):
-        st.error("Por favor, sube al menos el Listing, Stock Massalaves, HB y Auxiliar.")
+        st.error("Faltan archivos obligatorios.")
     else:
-        # Usamos la carga robusta por si suben TXT/CSV en lugar de XLSX
-        df_list = robust_read_csv(f_listing) if not f_listing.name.endswith('.xlsx') else cargar_excel_pro(f_listing)
+        df_list = cargar_excel_pro(f_listing)
+        
+        # Filtro FBA
+        col_ff = next((c for c in df_list.columns if 'fulfillment-channel' in c), None)
+        if col_ff:
+            df_list = df_list[df_list[col_ff] != "AMAZON_EU"].copy()
+        
         df_mas = cargar_excel_pro(f_massalaves)
+        df_local = cargar_excel_pro(f_pais) if f_pais else None
         df_hb_data = cargar_excel_pro(f_hb)
         df_aux_data = cargar_excel_pro(f_aux)
         
-        # Identificar columnas críticas
-        try:
-            col_sku = next(c for c in df_list.columns if 'sku' in c)
-            col_msg = next(c for c in df_list.columns if 'merchant-shipping-group' in c)
-            
-            # Limpieza básica
-            df_list = df_list.dropna(subset=[col_sku])
-            df_list['is_s'] = df_list[col_sku].str.startswith('S')
-            
-            # Extraer SKU base para cruzar con stock físico
-            def extraer_base(sku):
-                s = str(sku).upper()
-                if s.startswith('S'): s = s[1:]
-                for pref in ['FR', 'IT', 'DE']:
-                    if s.startswith(pref): s = s[len(pref):]
-                return s
+        col_sku = next(c for c in df_list.columns if 'sku' in c)
+        col_msg = next(c for c in df_list.columns if 'merchant-shipping-group' in c)
 
-            df_list['sku_f_busqueda'] = procesar_serie_skus(df_list[col_sku].apply(extraer_base))
+        df_list['is_s'] = df_list[col_sku].str.startswith('S')
+        
+        def es_local(sku):
+            s = str(sku).upper()
+            return s.startswith(('FR', 'IT', 'DE')) or s.startswith(('SFR', 'SIT', 'SDE'))
 
-            # Mapa de Stock Central
-            c_ref_mas = next(c for c in df_mas.columns if 'referencia' in c or 'sku' in c)
-            c_stk_mas = next(c for c in df_mas.columns if 'disponible' in c or 'operativo' in c or 'comercial' in c)
-            df_mas['key'] = procesar_serie_skus(df_mas[c_ref_mas])
-            stk_map = df_mas.drop_duplicates('key').set_index('key')[c_stk_mas].astype(str).str.replace(',', '.').astype(float)
+        df_list['use_local'] = df_list[col_sku].apply(es_local) & (df_local is not None)
+        
+        def extraer_base_busqueda(sku):
+            s = str(sku).upper()
+            if s.startswith('S'): s = s[1:]
+            for pref in ['FR', 'IT', 'DE']:
+                if s.startswith(pref): s = s[len(pref):]
+            return s
 
-            # Cruce de Stock
-            df_list['stk_fisico'] = df_list['sku_f_busqueda'].map(stk_map).fillna(0).astype(float)
-            
-            # Cálculo final
-            df_list['quantity'] = np.where(
-                df_list['is_s'],
-                (df_list['stk_fisico'] * p_rework).astype(int),
-                (df_list['stk_fisico'] * p_normal).astype(int)
-            )
+        df_list['sku_f_busqueda'] = procesar_serie_skus(df_list[col_sku].apply(extraer_base_busqueda))
+        
+        def get_clean_map(df):
+            if df is None: return pd.Series()
+            c_ref = next(c for c in df.columns if 'referencia' in c or 'sku' in c)
+            c_stk = next(c for c in df.columns if 'disponible' in c or 'operativo' in c or 'comercial' in c)
+            df['key'] = procesar_serie_skus(df[c_ref])
+            df['stk_clean'] = df[c_stk].astype(str).str.replace(',', '.')
+            return df.drop_duplicates('key').set_index('key')['stk_clean']
 
-            # Formatear salida final para Amazon (TXT separado por tabuladores)
-            final = pd.DataFrame()
-            final['sku'] = df_list[col_sku]
-            final['quantity'] = df_list['quantity']
-            final['merchant-shipping-group-name'] = df_list[col_msg]
-            final['handling-time'] = final['merchant-shipping-group-name'].str.lower().map(ht_editables).fillna(2).astype(int)
+        stk_mas_map = get_clean_map(df_mas)
+        stk_loc_map = get_clean_map(df_local) if df_local is not None else pd.Series()
+        
+        df_list['stk_b'] = 0.0
+        # Lógica de asignación de stock local o central
+        df_list.loc[df_list['use_local'], 'stk_b'] = df_list.loc[df_list['use_local'], 'sku_f_busqueda'].map(stk_loc_map).fillna("0.0").astype(float)
+        df_list.loc[~df_list['use_local'], 'stk_b'] = df_list.loc[~df_list['use_local'], 'sku_f_busqueda'].map(stk_mas_map).fillna("0.0").astype(float)
+        
+        # Familias
+        df_aux_data['key_aux'] = procesar_serie_skus(df_aux_data.iloc[:, 0])
+        fam_map = df_aux_data.drop_duplicates('key_aux').set_index('key_aux').iloc[:, 1]
+        df_list['familia'] = df_list['sku_f_busqueda'].map(fam_map).fillna("Resto").astype(str).str.upper()
 
-            st.success("✅ Proceso completado.")
-            st.dataframe(final.head())
+        # Límites
+        skus_hb = set(procesar_serie_skus(df_hb_data.iloc[:, 0]))
+        def get_lim(fam, sku_a, sku_f):
+            if sku_a in skus_hb or sku_f in skus_hb or "HB" in fam or "GAE" in fam: return lim_hb
+            if "DESCANSO" in fam or "COLCHONES" in fam: return lim_colchones
+            if "JARDÍN" in fam or "JARDIN" in fam: return lim_jardin
+            return lim_resto
 
-            # Descarga del resultado
-            buffer = io.StringIO()
-            final.to_csv(buffer, sep='\t', index=False)
-            
-            fecha = datetime.now().strftime("%Y%m%d")
-            st.download_button(
-                label="📥 Descargar TXT para Amazon",
-                data=buffer.getvalue(),
-                file_name=f"{fecha}_STOCK_{tienda}_{pais}.txt",
-                mime="text/plain"
-            )
-        except Exception as e:
-            st.error(f"Error en el cruce de datos: {e}")
+        df_list['limite'] = [get_lim(f, a, s) for f, a, s in zip(df_list['familia'], df_list[col_sku], df_list['sku_f_busqueda'])]
+        
+        df_list['quantity'] = np.where(
+            df_list['stk_b'] >= df_list['limite'],
+            np.ceil(df_list['stk_b'] * np.where(df_list['is_s'], p_rework, p_normal)).astype(int),
+            0
+        )
+
+        final = pd.DataFrame()
+        final['sku'] = df_list[col_sku]
+        final['quantity'] = df_list['quantity']
+        final['merchant-shipping-group-name'] = df_list[col_msg]
+        final['handling-time'] = final['merchant-shipping-group-name'].str.lower().map(ht_editables).fillna(2).astype(int)
+        
+        st.success(f"✅ ¡Hecho! {len(final)} SKUs procesados.")
+        st.dataframe(final.head(10))
+        
+        fecha = datetime.now().strftime("%Y%m%d")
+        nombre_descarga = f"{fecha}_STOCK_{tienda}_{pais}.txt"
+        st.download_button(label=f"📥 Descargar {nombre_descarga}", data=final.to_csv(sep='\t', index=False), file_name=nombre_descarga)
