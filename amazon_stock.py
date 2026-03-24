@@ -1,20 +1,45 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import json
+import os
 import io
 from datetime import datetime
 
-# 1. Formateo de SKU estilo Excel (=TEXTO(A2;"00000"))
-# Esta función se usa para la SALIDA FINAL y para limpiar claves de cruce
+# --- 1. CONFIGURACIÓN DE PERSISTENCIA ---
+CONFIG_FILE = "amazon_config.json"
+
+def cargar_config_pro():
+    """Carga la configuración guardada o devuelve una por defecto."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return {
+        "blacklist": "112, 1509, 3909, IT112",
+        "ht": {
+            "ES": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Envlo gratuito": 1, "Fitness": 1, "No prime": 1, "Prime Nacional": 0, "Envío estandar": 3},
+            "DE": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 3, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 3, "Preventa": 5},
+            "FR": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 1, "Preventa": 5, "Envio 10 dias": 5, "Portes gratuitos": 2},
+            "IT": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 2, "Sin tarifa": 5, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 1, "Preventa": 5}
+        }
+    }
+
+def guardar_config_pro(blacklist_text, ht_dict):
+    """Guarda los cambios en el archivo JSON local."""
+    with open(CONFIG_FILE, "w") as f:
+        json.dump({"blacklist": blacklist_text, "ht": ht_dict}, f, indent=4)
+
+# --- 2. FUNCIONES DE PROCESAMIENTO ---
 def formatear_sku_excel(val):
+    """Lógica Excel: =TEXTO(A2; '00000')."""
     if pd.isna(val) or str(val).strip() == "": return ""
-    val_str = str(val).strip().split('.')[0]
+    val_str = str(val).strip().split('.')[0] # Limpiar decimales .0
     if val_str.isdigit():
         return val_str.zfill(5)
     return val_str
-
-def procesar_serie_skus(serie):
-    return serie.fillna("").apply(formatear_sku_excel)
 
 def cargar_excel_pro(file, skip=0):
     if file is None: return None
@@ -26,150 +51,161 @@ def cargar_excel_pro(file, skip=0):
         st.error(f"Error al leer {file.name}: {e}")
         return None
 
-st.set_page_config(page_title="Amazon Stock Manager Pro", layout="centered")
-st.title("📦 Actualizador de Stock: Lógica de Espejo (S)")
+# --- 3. INTERFAZ STREAMLIT ---
+st.set_page_config(page_title="Amazon Stock Manager Pro", layout="wide")
 
-# --- PASO 1: CONFIGURACIÓN ---
-st.header("1️⃣ Configuración y Porcentajes")
-col1, col2 = st.columns(2)
-with col1:
+# Inicializar configuración en la sesión
+if 'config' not in st.session_state:
+    st.session_state.config = cargar_config_pro()
+
+st.title("📦 Amazon Stock & Rework Manager")
+
+# --- PANEL LATERAL / SUPERIOR DE CONTROL ---
+with st.sidebar:
+    st.header("⚙️ Configuración Global")
     tienda = st.selectbox("Tienda", ["Jabiru", "Turaco", "Marabu"])
     pais = st.selectbox("País de Destino", ["ES", "IT", "FR", "DE"])
-with col2:
     p_normal = st.slider("% Stock Estándar", 0, 100, 80) / 100
     p_rework = st.slider("% Stock Rework (S)", 0, 100, 20) / 100
+    
+    if st.button("💾 GUARDAR TODO (Memoria Permanente)"):
+        st.session_state.config["blacklist"] = st.session_state.temp_bl
+        guardar_config_pro(st.session_state.temp_bl, st.session_state.config["ht"])
+        st.success("¡Configuración guardada!")
 
-# --- PANEL DE HANDLING TIMES ---
-st.header("⏱️ Panel de Handling Times")
-mapas_defecto = {
-    "ES": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Envlo gratuito": 1, "Fitness": 1, "No prime": 1, "Prime Nacional": 0, "Envío estandar": 3},
-    "DE": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 3, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 3, "Preventa": 5},
-    "FR": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 2, "Preventa": 5, "Envio 10 dias": 5, "Portes gratuitos": 2},
-    "IT": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 2, "Sin tarifa": 5, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 2, "Preventa": 5}
-}
+# --- CUERPO PRINCIPAL ---
+col_main, col_bl = st.columns([2, 1])
 
-ht_editables = {}
-with st.expander(f"Editar tiempos para {pais}"):
-    current_map = mapas_defecto[pais]
-    cols_ht = st.columns(3)
-    for i, (msg, val) in enumerate(current_map.items()):
-        ht_editables[msg.lower()] = cols_ht[i % 3].number_input(msg, value=val, key=f"ht_{pais}_{msg}")
+with col_bl:
+    st.subheader("🚫 Blacklist Editable")
+    bl_txt = st.text_area("SKUs a bloquear (un SKU por línea o comas):", 
+                          value=st.session_state.config["blacklist"], 
+                          height=250, key="temp_bl")
+    # Procesar la lista de bloqueo para el motor
+    blacklist_set = set([formatear_sku_excel(x.strip()) for x in bl_txt.replace('\n', ',').split(',') if x.strip()])
 
-# --- PASO 2: LÍMITES Y CARGA ---
-st.header("2️⃣ Límites y Ficheros")
-l1, l2 = st.columns(2)
-with l1:
-    lim_hb = st.number_input("Heavy & Bulky (HB) >=", value=15)
-    lim_colchones = st.number_input("Colchones/Descanso >=", value=10)
-with l2:
-    lim_jardin = st.number_input("Jardín >=", value=10)
-    lim_resto = st.number_input("Resto de catálogo >=", value=40)
+with col_main:
+    st.subheader("⏱️ Handling Times (Tiempos de Preparación)")
+    ht_pais = st.session_state.config["ht"].get(pais, {})
+    ht_actualizados = {}
+    
+    with st.expander(f"Editar tiempos para {pais}", expanded=False):
+        c_ht = st.columns(2)
+        for i, (msg, val) in enumerate(ht_pais.items()):
+            nuevo_v = c_ht[i % 2].number_input(msg, value=int(val), key=f"ht_inp_{pais}_{msg}")
+            ht_actualizados[msg.lower()] = nuevo_v
+            # Actualizar en memoria de sesión
+            st.session_state.config["ht"][pais][msg] = nuevo_v
 
-f_listing = st.file_uploader("📄 1. Informe Listings Amazon", type=["xlsx"])
-f_massalaves = st.file_uploader("🏢 2. Stock Massalaves (Central ES)", type=["xlsx"])
-f_pais = st.file_uploader(f"🌍 3. Stock Local {pais}", type=["xlsx"]) if pais != "ES" else None
-f_hb = st.file_uploader("🐘 4. Fichero Heavy & Bulky (HB)", type=["xlsx"])
-f_aux = st.file_uploader("🏷️ 5. Auxiliar Plytix (Familias)", type=["xlsx"])
-f_bl_gen = st.file_uploader("🚫 6. Blacklist GLOBAL", type=["xlsx"])
-f_exc_pais = st.file_uploader("📍 7. Excepciones País", type=["xlsx"])
+    st.subheader("📤 Carga de Ficheros")
+    f_list_file = st.file_uploader("1. Informe Listings Amazon (.xlsx)", type=["xlsx"])
+    f_mas_file = st.file_uploader("2. Stock Massalaves (Central ES)", type=["xlsx"])
+    f_loc_file = st.file_uploader(f"3. Stock Local {pais}", type=["xlsx"]) if pais != "ES" else None
+    
+    with st.expander("Ficheros Auxiliares (HB, Familias)"):
+        f_hb_file = st.file_uploader("4. Fichero Heavy & Bulky (HB)", type=["xlsx"])
+        f_aux_file = st.file_uploader("5. Auxiliar Plytix (Familias)", type=["xlsx"])
 
-if st.button("🚀 GENERAR ACTUALIZACIÓN"):
-    if not (f_listing and f_massalaves and f_hb and f_aux):
-        st.error("Faltan archivos obligatorios.")
+# --- 4. MOTOR DE CÁLCULO ---
+if st.button("🚀 GENERAR FICHERO DE STOCK"):
+    if not (f_list_file and f_mas_file and f_hb_file and f_aux_file):
+        st.error("Por favor, sube todos los archivos obligatorios.")
     else:
-        df_list = cargar_excel_pro(f_listing)
-        
-        # Filtro FBA (Omitir AMAZON_EU)
+        # Cargar datos
+        df_list = cargar_excel_pro(f_list_file)
+        df_mas = cargar_excel_pro(f_mas_file)
+        df_local = cargar_excel_pro(f_loc_file)
+        df_hb_data = cargar_excel_pro(f_hb_file)
+        df_aux_data = cargar_excel_pro(f_aux_file)
+
+        # Filtro FBA
         col_ff = next((c for c in df_list.columns if 'fulfillment-channel' in c), None)
-        if col_ff:
-            df_list = df_list[df_list[col_ff] != "AMAZON_EU"].copy()
-        
-        df_mas = cargar_excel_pro(f_massalaves)
-        df_local = cargar_excel_pro(f_pais)
-        df_hb_data = cargar_excel_pro(f_hb)
-        df_aux_data = cargar_excel_pro(f_aux)
-        
+        if col_ff: df_list = df_list[df_list[col_ff] != "AMAZON_EU"].copy()
+
         col_sku = next(c for c in df_list.columns if 'sku' in c)
         col_msg = next(c for c in df_list.columns if 'merchant-shipping-group' in c)
 
-        # --- LÓGICA INTERNA DE CRUCE (SIN MODIFICAR EL SKU FINAL) ---
+        # --- LÓGICA DE CRUCE (SKU ESPEJO) ---
         df_list['is_s'] = df_list[col_sku].str.startswith('S')
         
-        # Identificar si debe buscar en el almacén local del país
-        def es_local(sku):
+        def extraer_base(sku):
             s = str(sku).upper()
-            return s.startswith(('FR', 'IT', 'DE')) or s.startswith(('SFR', 'SIT', 'SDE'))
-
-        df_list['use_local'] = df_list[col_sku].apply(es_local) & (df_local is not None)
-        
-        # Función para extraer el SKU numérico "padre" para buscar el stock físico
-        def extraer_base_busqueda(sku):
-            s = str(sku).upper()
-            if s.startswith('S'): s = s[1:] # Quitar S de Rework
-            for pref in ['FR', 'IT', 'DE']: # Quitar prefijos de país
-                if s.startswith(pref): s = s[len(pref):]
+            if s.startswith('S'): s = s[1:]
+            for p in ['FR', 'IT', 'DE']:
+                if s.startswith(p): s = s[len(p):]
             return s
 
-        df_list['sku_interno_busqueda'] = df_list[col_sku].apply(extraer_base_busqueda)
-        df_list['sku_f_busqueda'] = procesar_serie_skus(df_list['sku_interno_busqueda'])
+        df_list['sku_f_busqueda'] = df_list[col_sku].apply(extraer_base).apply(formatear_sku_excel)
         
-        # Mapas de stock
-        def get_clean_map(df):
+        # Crear mapas de stock
+        def create_stk_map(df):
             if df is None: return pd.Series()
-            c_ref = next(c for c in df.columns if 'referencia' in c or 'sku' in c)
-            c_stk = next(c for c in df.columns if 'disponible' in c or 'operativo' in c)
-            df['key'] = procesar_serie_skus(df[c_ref])
-            df['stk_clean'] = df[c_stk].astype(str).str.replace(',', '.')
-            return df.drop_duplicates('key').set_index('key')['stk_clean']
+            c_ref = next(c for c in df.columns if any(x in c for x in ['referencia', 'sku']))
+            c_stk = next(c for c in df.columns if any(x in c for x in ['disponible', 'operativo']))
+            df['key'] = df[c_ref].apply(formatear_sku_excel)
+            df['stk_val'] = df[c_stk].astype(str).str.replace(',', '.').replace('nan', '0')
+            return df.drop_duplicates('key').set_index('key')['stk_val']
 
-        stk_mas_map = get_clean_map(df_mas)
-        stk_loc_map = get_clean_map(df_local)
+        map_mas = create_stk_map(df_mas)
+        map_loc = create_stk_map(df_local)
+
+        # Asignar Stock Base
+        df_list['use_local'] = df_list[col_sku].str.contains(f"^{pais}|^S{pais}", case=False, na=False) & (df_local is not None)
         
-        # Asignar Stock del "Padre"
         df_list['stk_b'] = 0.0
-        df_list.loc[df_list['use_local'], 'stk_b'] = df_list.loc[df_list['use_local'], 'sku_f_busqueda'].map(stk_loc_map).fillna("0.0").astype(float)
-        df_list.loc[~df_list['use_local'], 'stk_b'] = df_list.loc[~df_list['use_local'], 'sku_f_busqueda'].map(stk_mas_map).fillna("0.0").astype(float)
-        
-        # Familias y Bloqueos (Usando SKU base)
-        df_aux_data['key_aux'] = procesar_serie_skus(df_aux_data.iloc[:, 0])
-        fam_map = df_aux_data.drop_duplicates('key_aux').set_index('key_aux').iloc[:, 1]
-        df_list['familia'] = df_list['sku_f_busqueda'].map(fam_map).fillna("Resto").astype(str).str.upper()
+        df_list.loc[df_list['use_local'], 'stk_b'] = df_list['sku_f_busqueda'].map(map_loc).fillna("0").astype(float)
+        df_list.loc[~df_list['use_local'], 'stk_b'] = df_list['sku_f_busqueda'].map(map_mas).fillna("0").astype(float)
 
-        bl = set()
-        if f_bl_gen: bl.update(procesar_serie_skus(cargar_excel_pro(f_bl_gen).iloc[:,0]))
-        if f_exc_pais:
-            skip_v = 2 if any(n in f_exc_pais.name for n in ["Espan", "Italia"]) else 0
-            bl.update(procesar_serie_skus(cargar_excel_pro(f_exc_pais, skip=skip_v).iloc[:,0]))
-
-        # Cálculo de Cantidad con el multiplicador correspondiente
-        skus_hb = set(procesar_serie_skus(df_hb_data.iloc[:, 0]))
-        
-        def get_lim(fam, sku_a, sku_f):
-            if sku_a in skus_hb or sku_f in skus_hb or "HB" in fam or "GAE" in fam: return lim_hb
-            if "DESCANSO" in fam or "COLCHONES" in fam: return lim_colchones
-            if "JARDÍN" in fam or "JARDIN" in fam: return lim_jardin
-            return lim_resto
-
-        df_list['limite'] = [get_lim(f, a, s) for f, a, s in zip(df_list['familia'], df_list[col_sku], df_list['sku_f_busqueda'])]
-        df_list['bloqueado'] = df_list[col_sku].isin(bl) | df_list['sku_f_busqueda'].isin(bl)
-        
-        df_list['quantity'] = np.where(
-            (df_list['stk_b'] >= df_list['limite']) & (~df_list['bloqueado']),
-            np.ceil(df_list['stk_b'] * np.where(df_list['is_s'], p_rework, p_normal)).astype(int),
-            0
+        # Bloqueos (Panel de Blacklist)
+        # Comprobamos tanto el SKU de Amazon como el SKU base
+        df_list['bloqueado'] = (
+            df_list[col_sku].apply(formatear_sku_excel).isin(blacklist_set) | 
+            df_list['sku_f_busqueda'].isin(blacklist_set)
         )
 
-        # SALIDA FINAL (Manteniendo el SKU original tal cual)
+        # Límites por familia
+        df_aux_data['key_aux'] = df_aux_data.iloc[:, 0].apply(formatear_sku_excel)
+        fam_map = df_aux_data.drop_duplicates('key_aux').set_index('key_aux').iloc[:, 1]
+        df_list['familia'] = df_list['sku_f_busqueda'].map(fam_map).fillna("RESTO").str.upper()
+
+        lim_hb, lim_col, lim_jar, lim_rest = 15, 10, 10, 40 # Valores base
+        skus_hb_list = set(df_hb_data.iloc[:, 0].apply(formatear_sku_excel))
+
+        def calc_qty(row):
+            if row['bloqueado']: return 0
+            # Definir límite
+            l = lim_rest
+            if row[col_sku] in skus_hb_list or row['sku_f_busqueda'] in skus_hb_list or "HB" in row['familia']: l = lim_hb
+            elif "DESCANSO" in row['familia']: l = lim_col
+            elif "JARDIN" in row['familia'] or "JARDÍN" in row['familia']: l = lim_jar
+            
+            if row['stk_b'] < l: return 0
+            mult = p_rework if row['is_s'] else p_normal
+            return int(np.ceil(row['stk_b'] * mult))
+
+        df_list['quantity'] = df_list.apply(calc_qty, axis=1)
+
+        # Formatear Salida
         final = pd.DataFrame()
-        # Aquí el SKU permanece IGUAL que en el listing, con su S y prefijos
-        final['sku'] = df_list[col_sku]
+        final['sku'] = df_list[col_sku] # El SKU original con su S o prefijo
         final['quantity'] = df_list['quantity']
         final['merchant-shipping-group-name'] = df_list[col_msg]
-        final['handling-time'] = final['merchant-shipping-group-name'].str.lower().map(ht_editables).fillna(2).astype(int)
+        # Asignar HT desde el diccionario actualizado
+        final['handling-time'] = final['merchant-shipping-group-name'].str.lower().map(ht_actualizados).fillna(2).astype(int)
+
+        st.divider()
+        st.subheader("✅ Resultado Final")
+        st.dataframe(final.head(15), use_container_width=True)
         
-        st.success(f"✅ ¡Hecho! Los SKUs con S (ej: {final['sku'].iloc[0] if not final.empty else 'S01951'}) mantienen su formato original.")
-        st.dataframe(final.head(10))
-        
-        fecha = datetime.now().strftime("%Y%m%d")
-        nombre_descarga = f"{fecha}_STOCK_{tienda}_{pais}.txt"
-        st.download_button(label=f"📥 Descargar {nombre_descarga}", data=final.to_csv(sep='\t', index=False), file_name=nombre_descarga)
+        # Descarga
+        tsv = final.to_csv(sep='\t', index=False)
+        fecha_str = datetime.now().strftime("%Y%m%d")
+        st.download_button(
+            label=f"📥 Descargar STOCK_{tienda}_{pais}.txt",
+            data=tsv,
+            file_name=f"{fecha_str}_STOCK_{tienda}_{pais}.txt",
+            mime="text/plain"
+        )
+
+# --- 5. NOTA PARA EL USUARIO ---
+st.info("💡 RECUERDA: Si añades SKUs a la Blacklist o cambias los tiempos, pulsa el botón 'GUARDAR TODO' en la barra lateral para que la app lo recuerde siempre.")
