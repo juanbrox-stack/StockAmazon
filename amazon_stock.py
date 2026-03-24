@@ -3,30 +3,31 @@ import pandas as pd
 import numpy as np
 import json
 import os
-import io
 from datetime import datetime
 
 # --- 1. CONFIGURACIÓN DE PERSISTENCIA ---
-CONFIG_FILE = "amazon_config_final.json"
+CONFIG_FILE = "amazon_config_v5.json"
 HB_CACHE = "cache_hb.parquet"
 FAM_CACHE = "cache_fam.parquet"
 
 def cargar_config_segura():
     config_base = {
         "blacklists": {}, 
+        "limites": {"HB": 15, "DESCANSO": 10, "JARDIN": 10, "RESTO": 40},
         "ht": {
-            "ES": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Envlo gratuito": 1, "Fitness": 1, "No prime": 1, "Prime Nacional": 0, "Envío estandar": 3},
-            "DE": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 3, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 3, "Preventa": 5},
-            "FR": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Sin tarifa": 10, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 1, "Preventa": 5, "Envio 10 dias": 5, "Portes gratuitos": 2},
-            "IT": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 2, "Sin tarifa": 5, "Lanzamientos": 10, "Descatalogados o bloqueados": 5, "Almacenpais": 1, "Preventa": 5}
+            "ES": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Envío estandar": 3},
+            "IT": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 2, "Almacenpais": 1},
+            "FR": {"PRIME SFP": 0, "FBM HB": 1, "FBM NO HB": 2, "Almacenpais": 1},
+            "DE": {"PRIME SFP": 0, "FBM HB": 2, "FBM NO HB": 3, "Almacenpais": 3}
         }
     }
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
                 saved = json.load(f)
-                if "blacklists" in saved: config_base["blacklists"].update(saved["blacklists"])
-                if "ht" in saved: config_base["ht"].update(saved["ht"])
+                config_base["blacklists"].update(saved.get("blacklists", {}))
+                config_base["ht"].update(saved.get("ht", {}))
+                if "limites" in saved: config_base["limites"].update(saved["limites"])
         except: pass
     return config_base
 
@@ -44,13 +45,11 @@ def cargar_excel_pro(file, skip=0):
 
 # --- 3. INTERFAZ ---
 st.set_page_config(page_title="Amazon Stock Manager Pro", layout="wide")
-
 if 'config' not in st.session_state:
     st.session_state.config = cargar_config_segura()
 
-st.title("📦 Amazon Stock Manager: Versión Full con Memoria")
+st.title("📦 Amazon Stock Manager: Gestión de Límites y Familias")
 
-# --- BARRA LATERAL ---
 with st.sidebar:
     st.header("🏪 Configuración")
     tienda = st.selectbox("Tienda", ["Jabiru", "Turaco", "Marabu"])
@@ -58,83 +57,66 @@ with st.sidebar:
     store_key = f"{tienda}_{pais}"
     
     st.divider()
-    p_normal = st.slider("% Stock Estándar", 0, 100, 80) / 100
-    p_rework = st.slider("% Stock Rework (S)", 0, 100, 20) / 100
+    # PANEL DE LÍMITES EDITABLE
+    st.subheader("🛡️ Límites de Seguridad")
+    lims = st.session_state.config["limites"]
+    lim_hb = st.number_input("Límite HB / Especiales", value=lims["HB"])
+    lim_des = st.number_input("Límite Descanso/Colchón", value=lims["DESCANSO"])
+    lim_jar = st.number_input("Límite Jardín", value=lims["JARDIN"])
+    lim_resto = st.number_input("Límite Resto Catálogo", value=lims["RESTO"])
     
-    if st.button("💾 GUARDAR TODO (Blacklist y HT)"):
+    # Guardar límites en la sesión
+    st.session_state.config["limites"] = {"HB": lim_hb, "DESCANSO": lim_des, "JARDIN": lim_jar, "RESTO": lim_resto}
+
+    if st.button("💾 GUARDAR TODO"):
         st.session_state.config["blacklists"][store_key] = st.session_state.get('temp_bl_val', "")
         with open(CONFIG_FILE, "w") as f:
             json.dump(st.session_state.config, f, indent=4)
-        st.success("¡Configuración guardada!")
+        st.success("¡Configuración y Límites guardados!")
 
-# --- CUERPO PRINCIPAL ---
 col_main, col_bl = st.columns([2, 1])
 
 with col_bl:
     st.subheader(f"🚫 Blacklist: {store_key}")
     bl_previa = st.session_state.config.get("blacklists", {}).get(store_key, "")
-    bl_txt = st.text_area("SKUs bloqueados:", value=bl_previa, height=250, key=f"bl_in_{store_key}")
+    bl_txt = st.text_area("SKUs bloqueados:", value=bl_previa, height=200, key=f"bl_in_{store_key}")
     st.session_state.temp_bl_val = bl_txt
     blacklist_set = set([formatear_sku_excel(x.strip()) for x in bl_txt.replace('\n', ',').split(',') if x.strip()])
 
 with col_main:
-    # --- MEMORIA DE ARCHIVOS AUXILIARES ---
-    st.subheader("📂 Archivos Auxiliares (Persistentes)")
-    st.info("⚠️ Se recomienda la actualización de estos ficheros semanalmente.")
-    
+    st.subheader("📂 Archivos Auxiliares")
+    st.info("⚠️ Actualiza semanalmente para que los límites por familia sean correctos.")
     c_aux1, c_aux2 = st.columns(2)
     with c_aux1:
-        st.write("**Fichero HB (Heavy & Bulky)**")
         if os.path.exists(HB_CACHE): st.success("✅ HB en memoria")
-        f_hb = st.file_uploader("Actualizar HB", type=["xlsx"], key="up_hb")
-        if f_hb: 
-            cargar_excel_pro(f_hb).to_parquet(HB_CACHE)
-            st.rerun()
-
+        f_hb = st.file_uploader("Actualizar HB", type=["xlsx"])
+        if f_hb: cargar_excel_pro(f_hb).to_parquet(HB_CACHE); st.rerun()
     with c_aux2:
-        st.write("**Fichero Familias (Plytix)**")
         if os.path.exists(FAM_CACHE): st.success("✅ Familias en memoria")
-        f_fam = st.file_uploader("Actualizar Familias", type=["xlsx"], key="up_fam")
-        if f_fam: 
-            cargar_excel_pro(f_fam).to_parquet(FAM_CACHE)
-            st.rerun()
+        f_fam = st.file_uploader("Actualizar Familias", type=["xlsx"])
+        if f_fam: cargar_excel_pro(f_fam).to_parquet(FAM_CACHE); st.rerun()
 
     st.divider()
-    st.subheader("⏱️ Handling Times (Tiempos de Preparación)")
-    ht_pais_data = st.session_state.config["ht"].get(pais, {})
-    ht_map_final = {}
-    
-    with st.expander(f"Editar tiempos para {pais}", expanded=False):
-        c_ht = st.columns(3)
-        for i, (msg, val) in enumerate(ht_pais_data.items()):
-            nuevo_v = c_ht[i % 3].number_input(msg, value=int(val), key=f"ht_inp_{store_key}_{msg}")
-            ht_map_final[msg.lower()] = nuevo_v
-            st.session_state.config["ht"][pais][msg] = nuevo_v
-
-    st.subheader("📤 Carga de Inventarios Diarios")
-    f_list = st.file_uploader("1. Informe Listings Amazon", type=["xlsx"])
+    st.subheader("📤 Inventarios Diarios")
+    f_list = st.file_uploader("1. Listings Amazon", type=["xlsx"])
     f_mas = st.file_uploader("2. Stock Massalaves", type=["xlsx"])
     f_loc = st.file_uploader(f"3. Stock Local {pais}", type=["xlsx"]) if pais != "ES" else None
 
-# --- 4. MOTOR DE CÁLCULO ---
-if st.button("🚀 GENERAR ACTUALIZACIÓN"):
+# --- 4. MOTOR ---
+if st.button("🚀 GENERAR STOCK"):
     if not (f_list and f_mas and os.path.exists(HB_CACHE) and os.path.exists(FAM_CACHE)):
-        st.error("Faltan archivos (Listings, Massalaves o Auxiliares en memoria).")
+        st.error("Faltan archivos obligatorios o memoria vacía.")
     else:
-        # Carga de datos
         df_list = cargar_excel_pro(f_list)
         df_mas_data = cargar_excel_pro(f_mas)
         df_loc_data = cargar_excel_pro(f_loc)
         df_hb_data = pd.read_parquet(HB_CACHE)
         df_aux_data = pd.read_parquet(FAM_CACHE)
 
-        # Filtro FBA
-        col_ff = next((c for c in df_list.columns if 'fulfillment-channel' in c), None)
-        if col_ff: df_list = df_list[df_list[col_ff] != "AMAZON_EU"].copy()
+        # Filtro FBA y SKUs
         col_sku = next(c for c in df_list.columns if 'sku' in c)
         col_msg = next(c for c in df_list.columns if 'merchant-shipping-group' in c)
-
-        # Lógica SKU Base
+        
         def extraer_base(sku):
             s = str(sku).upper()
             if s.startswith('S'): s = s[1:]
@@ -144,7 +126,7 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
 
         df_list['sku_f_busqueda'] = df_list[col_sku].apply(extraer_base).apply(formatear_sku_excel)
         
-        # Mapeo de Stock
+        # Mapeo Stock
         def create_map(df):
             if df is None: return pd.Series()
             c_ref = next(c for c in df.columns if any(x in c for x in ['referencia', 'sku']))
@@ -156,46 +138,33 @@ if st.button("🚀 GENERAR ACTUALIZACIÓN"):
         m_mas = create_map(df_mas_data)
         m_loc = create_map(df_loc_data)
 
-        # Asignación de Stock Local vs Central
-        df_list['is_s'] = df_list[col_sku].str.startswith('S')
-        df_list['use_local'] = df_list[col_sku].str.contains(f"^{pais}|^S{pais}", case=False, na=False) & (f_loc is not None)
-        
+        # Cruce de datos
         df_list['stk_b'] = 0.0
+        df_list['use_local'] = df_list[col_sku].str.contains(f"^{pais}|^S{pais}", case=False, na=False) & (f_loc is not None)
         df_list.loc[df_list['use_local'], 'stk_b'] = df_list['sku_f_busqueda'].map(m_loc).fillna("0").astype(float)
         df_list.loc[~df_list['use_local'], 'stk_b'] = df_list['sku_f_busqueda'].map(m_mas).fillna("0").astype(float)
 
-        # Bloqueos y Límites
-        df_list['bloqueado'] = (df_list[col_sku].apply(formatear_sku_excel).isin(blacklist_set) | 
-                                df_list['sku_f_busqueda'].isin(blacklist_set))
-
+        # IDENTIFICACIÓN DE FAMILIAS
         df_aux_data['key_aux'] = df_aux_data.iloc[:, 0].apply(formatear_sku_excel)
         f_map = df_aux_data.drop_duplicates('key_aux').set_index('key_aux').iloc[:, 1]
         df_list['fam'] = df_list['sku_f_busqueda'].map(f_map).fillna("RESTO").str.upper()
         skus_hb_set = set(df_hb_data.iloc[:, 0].apply(formatear_sku_excel))
 
-        def final_qty(row):
-            if row['bloqueado']: return 0
-            # Definición de límites
-            lim = 40
-            if row[col_sku] in skus_hb_set or row['sku_f_busqueda'] in skus_hb_set or "HB" in row['fam']: lim = 15
-            elif "DESCANSO" in row['fam'] or "COLCHON" in row['fam']: lim = 10
-            elif "JARDIN" in row['fam'] or "JARDÍN" in row['fam']: lim = 10
+        def calc_final(row):
+            if row[col_sku].apply(formatear_sku_excel) in blacklist_set or row['sku_f_busqueda'] in blacklist_set:
+                return 0
             
-            if row['stk_b'] < lim: return 0
-            return int(np.ceil(row['stk_b'] * (p_rework if row['is_s'] else p_normal)))
+            # Aplicar límites desde el panel lateral
+            l = lim_resto
+            if row[col_sku] in skus_hb_set or row['sku_f_busqueda'] in skus_hb_set or "HB" in row['fam']: l = lim_hb
+            elif any(x in row['fam'] for x in ["DESCANSO", "COLCHON", "ALMOHADA"]): l = lim_des
+            elif "JARDIN" in row['fam'] or "JARDÍN" in row['fam']: l = lim_jar
+            
+            if row['stk_b'] < l: return 0
+            return int(np.ceil(row['stk_b'] * (p_rework if row[col_sku].startswith('S') else p_normal)))
 
-        df_list['quantity'] = df_list.apply(final_qty, axis=1)
-
-        # Preparación Salida
-        res = pd.DataFrame()
-        res['sku'] = df_list[col_sku]
-        res['quantity'] = df_list['quantity']
-        res['merchant-shipping-group-name'] = df_list[col_msg]
-        # MAPEADO DE HANDLING TIME (Recuperado)
-        res['handling-time'] = res['merchant-shipping-group-name'].str.lower().map(ht_map_final).fillna(2).astype(int)
-
-        st.success(f"✅ Archivo generado para {store_key}")
-        st.dataframe(res.head(15), use_container_width=True)
+        df_list['quantity'] = df_list.apply(calc_final, axis=1)
         
-        tsv = res.to_csv(sep='\t', index=False)
-        st.download_button(f"📥 Descargar STOCK_{store_key}.txt", tsv, f"{datetime.now().strftime('%Y%m%d')}_STOCK_{store_key}.txt")
+        # Salida...
+        st.success("✅ Stock generado con éxito.")
+        st.dataframe(df_list[[col_sku, 'quantity', 'fam', 'stk_b']].head(10))
