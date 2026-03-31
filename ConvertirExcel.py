@@ -2,68 +2,70 @@ import streamlit as st
 import pandas as pd
 import io
 import csv
-import chardet # Librería para detectar la codificación automáticamente
 from io import BytesIO
 
-st.set_page_config(page_title="Conversor Pro (Columnas Limpias)", layout="wide")
+# Configuración de página
+st.set_page_config(page_title="Conversor Excel Limpio", layout="wide")
 
-def detectar_y_leer(uploaded_file):
+def limpieza_comillas(df):
     """
-    Detecta automáticamente la codificación (UTF-8, Latin-1, etc.)
-    para que las tildes y eñes salgan perfectas.
+    Elimina las comillas dobles sobrantes que aparecen al principio 
+    y al final de las celdas de texto.
+    """
+    # Aplicar limpieza a todas las celdas de tipo texto
+    return df.applymap(lambda x: x.strip('"') if isinstance(x, str) else x)
+
+def lectura_inteligente(uploaded_file):
+    """
+    Lee archivos probando UTF-8 y Latin-1, detectando errores de tildes
+    y separadores automáticamente.
     """
     if uploaded_file is None: return None
     
-    # 1. Leer una muestra del archivo para detectar la codificación
-    raw_data = uploaded_file.read(10000)
-    resultado = chardet.detect(raw_data)
-    encoding_detectado = resultado['encoding']
-    
-    # Si no detecta nada claro, probamos los estándares
-    if not encoding_detectado:
-        encoding_detectado = 'utf-8'
-
-    try:
-        uploaded_file.seek(0)
-        content = uploaded_file.read().decode(encoding_detectado, errors='replace')
-        
-        # Limpiar caracteres nulos
-        content = content.replace('\x00', '')
-        
-        # 2. Leer con Pandas
-        # Usamos engine='python' y sep=None para que detecte si es ; o tabulador solo
-        df = pd.read_csv(
-            io.StringIO(content),
-            sep=None,
-            engine='python',
-            on_bad_lines='skip',
-            quoting=csv.QUOTE_NONE
-        )
-        return df
-    except Exception as e:
-        # Si falla el detectado, intento de emergencia en latin-1
+    for enc in ['utf-8', 'latin-1', 'cp1252']:
         try:
             uploaded_file.seek(0)
-            return pd.read_csv(uploaded_file, sep=None, engine='python', encoding='latin-1', on_bad_lines='skip')
+            content = uploaded_file.read().decode(enc)
+            
+            # Cargamos el DataFrame
+            df = pd.read_csv(
+                io.StringIO(content),
+                sep=None, 
+                engine='python',
+                on_bad_lines='skip',
+                quoting=csv.QUOTE_NONE # Necesario para que no falle la lectura inicial
+            )
+            
+            # Verificación de tildes/eñes (Ã es el síntoma de error en UTF-8)
+            columnas_texto = "".join(df.columns.astype(str))
+            if 'Ã' in columnas_texto or 'Â' in columnas_texto:
+                continue 
+            
+            # LIMPIEZA DE COMILLAS: Una vez leído, quitamos las " de los datos
+            df = limpieza_comillas(df)
+            # También limpiamos las comillas de los nombres de las columnas
+            df.columns = [col.strip('"') for col in df.columns]
+                
+            return df
         except:
-            st.error(f"Error al procesar {uploaded_file.name}")
-            return None
+            continue
+    return None
 
 def generar_excel(uploaded_file):
-    df = detectar_y_leer(uploaded_file)
+    df = lectura_inteligente(uploaded_file)
     if df is not None:
         try:
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False)
             return output.getvalue()
-        except Exception as e:
+        except:
             return None
     return None
 
 # --- INTERFAZ ---
-st.title("📂 Conversor de Excel con Columnas Limpias")
-st.write("Corrige automáticamente tildes y caracteres extraños (Ã³, Ã¡, etc.)")
+st.title("📂 Conversor a Excel (Sin Comillas)")
+st.write("Limpia automáticamente tildes (Ã³) y elimina las comillas dobles ( \" ) de las filas.")
 
 archivos = st.file_uploader("Sube tus archivos (Máx 10)", type=['csv', 'txt'], accept_multiple_files=True)
 
@@ -86,8 +88,8 @@ if archivos:
                         data=excel_data,
                         file_name=nombre_out,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"dl_{i}",
+                        key=f"dl_{i}_{archivo.name}",
                         use_container_width=True
                     )
                 else:
-                    st.error("No se pudo procesar correctamente")
+                    st.error("Error al procesar el archivo")
